@@ -840,7 +840,7 @@ async function saveTicketEdit() {
   const btn = document.getElementById('save-edit-btn');
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
-    await ticketsCol.doc(editingDocId).update({
+    const updates = {
       title,
       desc:     document.getElementById('f-desc').value.trim(),
       status:   document.getElementById('f-status').value,
@@ -848,8 +848,14 @@ async function saveTicketEdit() {
       category: document.getElementById('f-category').value,
       assignee: document.getElementById('f-assignee').value.trim(),
       updated:  new Date().toISOString(),
-    });
+    };
+    await ticketsCol.doc(editingDocId).update(updates);
+    // Optimistically update local cache so the table reflects the change immediately
+    const idx = cachedTickets.findIndex(x => x._docId === editingDocId);
+    if (idx !== -1) cachedTickets[idx] = { ...cachedTickets[idx], ...updates };
     closeModal('modal-ticket');
+    renderTickets();
+    if (document.getElementById('view-dashboard').classList.contains('active')) renderDashboard();
     toast('Ticket updated.', 'success');
   } catch (e) {
     console.error(e); toast('Error saving changes.', 'error');
