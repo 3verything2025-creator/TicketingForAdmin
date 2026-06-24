@@ -237,12 +237,7 @@
 <div class="container">
 
   <!-- CONFIG WARNING -->
-  <div class="config-banner" id="config-banner">
-    &#9888;&nbsp; <strong>Firebase not configured.</strong>
-    Replace the placeholder values in <code>FIREBASE_CONFIG</code> at the top of the &lt;script&gt;.
-    See the <a href="https://console.firebase.google.com/" target="_blank">Firebase Console</a> → Project Settings → Your apps → SDK setup.
-    Also set your Firestore rules to allow read/write (test mode is fine to start).
-  </div>
+  <div class="config-banner" id="config-banner" style="display:none"></div>
 
   <!-- ── SUBMITTER VIEWS ── -->
   <div id="view-submit" class="view">
@@ -363,6 +358,13 @@
         <option value="">All Category</option>
         <option>Bug</option><option>Feature</option><option>Support</option><option>Other</option>
       </select>
+      <div style="width:1px;background:var(--c1-mid);align-self:stretch;margin:0 .1rem"></div>
+      <button class="btn btn-ghost btn-sm" onclick="exportPDF()" title="Export all tickets as PDF">&#128196; PDF</button>
+      <button class="btn btn-ghost btn-sm" onclick="exportBackup()" title="Download JSON backup of all tickets">&#128190; Backup</button>
+      <label class="btn btn-ghost btn-sm" style="cursor:pointer" title="Import tickets from a JSON backup">
+        &#128229; Import
+        <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="importBackup(event)" />
+      </label>
     </div>
     <div class="panel ticket-table-wrap">
       <table class="ticket-table">
@@ -460,6 +462,8 @@
      ══════════════════════════════════════════════════════════ -->
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 
 <script>
 // ╔══════════════════════════════════════════════════════╗
@@ -975,6 +979,124 @@ function fmtDateTime(iso) {
   const d = new Date(iso);
   return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' +
          d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+}
+
+// ─── EXPORT: PDF ─────────────────────────────────────────
+function exportPDF() {
+  if (!cachedTickets.length) { toast('No tickets to export.', 'warning'); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+
+  doc.setFontSize(18);
+  doc.setTextColor(59, 130, 246);
+  doc.text('TicketFlow — All Tickets', 40, 44);
+  doc.setFontSize(9);
+  doc.setTextColor(120, 130, 148);
+  doc.text(`Exported: ${new Date().toLocaleString()}   |   Total tickets: ${cachedTickets.length}`, 40, 60);
+
+  const rows = [...cachedTickets]
+    .sort((a, b) => b.numId - a.numId)
+    .map(t => [
+      'TF-' + t.numId,
+      t.title.length > 50 ? t.title.slice(0, 50) + '…' : t.title,
+      t.submitterName || '—',
+      t.submitterEmail || '—',
+      t.status,
+      t.priority,
+      t.category,
+      t.assignee || '—',
+      fmtDate(t.created),
+    ]);
+
+  doc.autoTable({
+    startY: 72,
+    head: [['#ID', 'Subject', 'Submitted By', 'Email', 'Status', 'Priority', 'Category', 'Assignee', 'Created']],
+    body: rows,
+    theme: 'grid',
+    headStyles: { fillColor: [59, 130, 246], textColor: 255, fontStyle: 'bold', fontSize: 8.5 },
+    bodyStyles: { fontSize: 8, textColor: [30, 41, 59] },
+    alternateRowStyles: { fillColor: [240, 246, 255] },
+    margin: { left: 40, right: 40 },
+    didDrawPage(data) {
+      doc.setFontSize(8);
+      doc.setTextColor(160);
+      doc.text(`Page ${doc.internal.getCurrentPageInfo().pageNumber}`, data.settings.margin.left, doc.internal.pageSize.height - 20);
+    },
+  });
+
+  doc.save(`ticketflow-export-${new Date().toISOString().slice(0, 10)}.pdf`);
+  toast('PDF exported.', 'success');
+}
+
+// ─── EXPORT: JSON BACKUP ──────────────────────────────────
+function exportBackup() {
+  if (!cachedTickets.length) { toast('No tickets to back up.', 'warning'); return; }
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    version: 1,
+    tickets: cachedTickets.map(({ _docId, ...t }) => t),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `ticketflow-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast(`Backup downloaded (${payload.tickets.length} tickets).`, 'success');
+}
+
+// ─── IMPORT: JSON BACKUP ──────────────────────────────────
+async function importBackup(event) {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+
+  let parsed;
+  try { parsed = JSON.parse(await file.text()); }
+  catch { toast('Invalid JSON file.', 'error'); return; }
+
+  const tickets = parsed.tickets || (Array.isArray(parsed) ? parsed : null);
+  if (!tickets || !tickets.length) { toast('No tickets found in file.', 'error'); return; }
+
+  if (!confirm(`Import ${tickets.length} ticket(s) from "${file.name}"?\n\nTickets whose #ID already exists will be skipped. Existing tickets are not deleted.`)) return;
+
+  try {
+    const metaSnap = await metaDoc.get();
+    let nextId     = metaSnap.exists ? metaSnap.data().nextId : 100;
+    const existingIds = new Set(cachedTickets.map(t => t.numId));
+    const batch    = db.batch();
+    let added = 0;
+
+    for (const t of tickets) {
+      if (existingIds.has(t.numId)) continue;
+      batch.set(ticketsCol.doc(), {
+        numId:          t.numId,
+        title:          t.title || '(untitled)',
+        desc:           t.desc || '',
+        status:         t.status || 'Open',
+        priority:       t.priority || 'Medium',
+        category:       t.category || 'Other',
+        assignee:       t.assignee || '',
+        submitterName:  t.submitterName || '',
+        submitterEmail: t.submitterEmail || '',
+        created:        t.created || new Date().toISOString(),
+        updated:        t.updated || new Date().toISOString(),
+        comments:       t.comments || [],
+      });
+      existingIds.add(t.numId);
+      nextId = Math.max(nextId, t.numId + 1);
+      added++;
+    }
+
+    if (!added) { toast('All tickets in the file already exist — nothing imported.', 'warning'); return; }
+    batch.set(metaDoc, { nextId });
+    await batch.commit();
+    toast(`${added} ticket(s) imported successfully.`, 'success');
+  } catch (e) {
+    console.error(e);
+    toast('Error importing backup. Check the console.', 'error');
+  }
 }
 
 // ─── START ───────────────────────────────────────────────
