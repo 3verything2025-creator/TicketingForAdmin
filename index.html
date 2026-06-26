@@ -519,8 +519,13 @@ async function initApp() {
     document.getElementById('config-banner').classList.add('show');
   }
   document.getElementById('app-loading').classList.add('done');
+  // Restore staff session across page refreshes
+  if (localStorage.getItem('tf_staff') === '1') {
+    isStaff = true;
+  }
   buildNav();
-  showView('submit');
+  const savedView = isStaff && localStorage.getItem('tf_view');
+  showView(savedView || 'submit');
 }
 
 async function seedSampleData() {
@@ -565,7 +570,10 @@ function showView(name) {
     if (t.textContent.toLowerCase().includes(name === 'submit' ? 'submit' : name))
       t.classList.add('active');
   });
-  if ((name === 'dashboard' || name === 'tickets') && isStaff) startStaffListener();
+  if ((name === 'dashboard' || name === 'tickets') && isStaff) {
+    startStaffListener();
+    localStorage.setItem('tf_view', name);
+  }
 }
 
 // ─── STAFF LISTENER ──────────────────────────────────────
@@ -587,6 +595,8 @@ function doLogin() {
   const pw = document.getElementById('login-pw').value;
   if (pw === STAFF_PASS) {
     isStaff = true;
+    localStorage.setItem('tf_staff', '1');
+    localStorage.setItem('tf_view', 'dashboard');
     document.getElementById('login-pw').value = '';
     closeModal('modal-login');
     buildNav();
@@ -600,6 +610,8 @@ function doLogin() {
 }
 function staffLogout() {
   isStaff = false;
+  localStorage.removeItem('tf_staff');
+  localStorage.removeItem('tf_view');
   stopStaffListener();
   buildNav();
   showView('submit');
